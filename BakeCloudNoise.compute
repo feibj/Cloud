@@ -1,0 +1,81 @@
+#pragma kernel RebuildCloud
+#pragma kernel BakeLightDirDensity
+
+float4 _LightDir;
+float4 _RebuildTextureSize;
+
+#define _CloudResolution       128
+
+
+Texture2D<float2> _HeightMap;
+Texture3D<float4> _Noise3DInput;
+RWStructuredBuffer<float4> CloudBakeResult;
+SamplerState sampler_LinearRepeat;
+
+uint3 GetTexID(uint index)
+{
+    int xIndex = (index % (_CloudResolution * _CloudResolution)) % _CloudResolution;
+    int yIndex = floor((index % (_CloudResolution * _CloudResolution)) / _CloudResolution);
+    int zIndex = floor(index / (_CloudResolution * _CloudResolution));
+    return uint3(xIndex, yIndex, zIndex);
+}
+uint3 GetTexID(uint index , uint x , uint y )
+{
+    int xIndex = (index % (x * y)) % x;
+    int yIndex = floor((index % (x * y)) / x);
+    int zIndex = floor(index / (x * y));
+    return uint3(xIndex,yIndex, zIndex );
+}
+float Interpolation3(float value1, float value2, float value3, float x, float offset = 0.5)
+{
+    offset = clamp(offset, 0.0001, 0.9999);
+    return lerp(lerp(value1, value2, min(x, offset) / offset), value3, max(0, x - offset) / (1.0 - offset));
+}
+
+[numthreads(1024, 1, 1)]
+void RebuildCloud (uint3 id : SV_DispatchThreadID)
+{
+    uint3 texID = GetTexID(id.x,_RebuildTextureSize.x,_RebuildTextureSize.y);
+    texID.z+=_RebuildTextureSize.w;
+    //float3 uvw = ((float3)texID + 0.5) * rcp(_CloudResolution);
+    float3 uvw = ((float3)texID + 0.5);
+    uvw/=_RebuildTextureSize.xyz;
+    float4 noiseValue = _Noise3DInput.SampleLevel(sampler_LinearRepeat, uvw, 0);
+
+    CloudBakeResult[id.x] = float4(noiseValue.r, noiseValue.g,noiseValue.b,noiseValue.a);
+
+}
+
+[numthreads(1024, 1, 1)]
+void BakeLightDirDensity (uint3 id : SV_DispatchThreadID)
+{
+    // uint3 texID = GetTexID(id.x);
+    // float3 uvw = ((float3)texID + 0.5) * rcp(_CloudResolution);
+   uint3 texID = GetTexID(id.x,_RebuildTextureSize.x,_RebuildTextureSize.y);
+    float3 uvw = ((float3)texID + 0.5);
+    uvw/=_RebuildTextureSize.xyz;
+    float4 currentNoiseValue = _Noise3DInput.SampleLevel(sampler_LinearRepeat, uvw, 0);
+    float3 lightDirection = normalize(-_LightDir.xyz);
+    //float3 lightDirection = -normalize(float3(0, 1, 0.8));
+    float  lightDirDensity = 0;
+    lightDirection=normalize(float3(0.1,0.1,1));
+    //lightDirection = float3(lightDirection.x,lightDirection.z,lightDirection.y);
+    for (int i = 1; i < 1000; i++)
+    {
+        // float2 weatherTexUV = uvw.xz * 5;
+        // float4 weatherData = SAMPLE_TEXTURE2D_LOD(_WeatherTex, sampler_WeatherTex, weatherTexUV * 0.000001 + dsi.weatherTexOffset , 0);
+        float stepSize = max(( 1-uvw.z ) /1000 ,0);
+        float3 uvwOffset = i * lightDirection * stepSize;
+        float3 pos = uvw + uvwOffset;
+        if (   currentNoiseValue.r > 0)
+        {
+            float4 noiseValue = _Noise3DInput.SampleLevel(sampler_LinearRepeat, pos, 0);
+            //float cloudAbsorptivity = Interpolation3(0, weatherData.r, 1, 1.1);
+            lightDirDensity += noiseValue.r* stepSize;
+        }
+
+    }
+    float fbm = dot(currentNoiseValue.gba,float3(0.625,0.25,0.125));
+
+    CloudBakeResult[id.x] = float4(currentNoiseValue.r, lightDirDensity, fbm, lightDirDensity);
+}
